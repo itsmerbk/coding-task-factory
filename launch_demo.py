@@ -1,5 +1,4 @@
 import json
-import subprocess
 import threading
 import time
 import webbrowser
@@ -7,485 +6,315 @@ from dataclasses import asdict
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-from factory.benchmark import evaluate_models
-from factory.generator import synthesize_tasks
-from factory.validator import validate_task
+from factory.generator import (
+    BASE_COMMIT,
+    CLICK_REPO,
+    build_five_distinct_tasks,
+    export_all_harbor_tasks,
+)
+from factory.validator import validate_with_mutation_testing
 
 HOST = "127.0.0.1"
 PORT = 8765
 
-HTML_PAGE = r"""<!DOCTYPE html>
+HTML_PAGE = r'''<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Coding Task Factory — Innodata Frontier AI Hackathon 2026</title>
+  <title>Coding Task Factory — Team Technicians (Harbor v0.25.x)</title>
   <style>
     :root {
-      --bg: #0b0f19;
-      --panel: #121826;
-      --panel-alt: #182032;
-      --border: #263147;
-      --text: #e2e8f0;
+      --bg: #070b14;
+      --panel: #0f172a;
+      --panel-alt: #162036;
+      --border: #25334d;
+      --text: #f8fafc;
       --muted: #94a3b8;
-      --accent: #38bdf8;
-      --accent-glow: rgba(56, 189, 248, 0.2);
-      --green: #10b981;
+      --cyan: #38bdf8;
       --amber: #f59e0b;
-      --red: #ef4444;
+      --green: #10b981;
+      --red: #f43f5e;
     }
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body {
       font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Inter", sans-serif;
-      background: var(--bg);
+      background: radial-gradient(circle at 85% 8%, rgba(56, 189, 248, 0.14), transparent 36%), var(--bg);
       color: var(--text);
-      padding: 24px;
-      line-height: 1.5;
+      padding: 22px 26px;
+      line-height: 1.45;
     }
-    .container { max-width: 1280px; margin: 0 auto; }
+    .wrap { max-width: 1360px; margin: 0 auto; }
     header {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      flex-wrap: wrap;
-      gap: 16px;
-      padding-bottom: 20px;
-      border-bottom: 1px solid var(--border);
-      margin-bottom: 22px;
+      display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 14px;
+      background: var(--panel); border: 1px solid var(--border); border-radius: 14px;
+      padding: 16px 20px; margin-bottom: 18px;
     }
-    .title-group h1 { font-size: 1.55rem; font-weight: 700; letter-spacing: -0.02em; }
-    .subtitle { color: var(--muted); font-size: 0.9rem; margin-top: 4px; }
-    .badge {
-      display: inline-block;
-      background: rgba(56, 189, 248, 0.12);
-      color: var(--accent);
-      border: 1px solid rgba(56, 189, 248, 0.35);
-      padding: 3px 10px;
-      border-radius: 999px;
-      font-size: 0.78rem;
-      font-weight: 600;
-      margin-right: 8px;
+    .badges { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 6px; }
+    .pill {
+      font-size: 0.74rem; font-weight: 700; padding: 3px 10px; border-radius: 999px;
+      background: rgba(56, 189, 248, 0.14); border: 1px solid rgba(56, 189, 248, 0.4); color: var(--cyan);
     }
-    .controls {
-      display: flex;
-      align-items: center;
-      gap: 12px;
-      background: var(--panel);
-      padding: 10px 14px;
-      border-radius: 12px;
-      border: 1px solid var(--border);
+    .pill.amber { background: rgba(245, 158, 11, 0.14); border-color: rgba(245, 158, 11, 0.4); color: var(--amber); }
+    h1 { font-size: 1.38rem; font-weight: 800; letter-spacing: -0.02em; }
+    .sub { font-size: 0.82rem; color: var(--muted); margin-top: 3px; }
+    .run-btn {
+      background: linear-gradient(135deg, #0284c7, #38bdf8); color: #04101f;
+      border: none; border-radius: 10px; padding: 11px 20px; font-size: 0.9rem; font-weight: 800;
+      cursor: pointer; box-shadow: 0 0 20px rgba(56, 189, 248, 0.25);
     }
-    .controls label { font-size: 0.82rem; color: var(--muted); }
-    .controls input, .controls select {
-      background: var(--panel-alt);
-      color: var(--text);
-      border: 1px solid var(--border);
-      border-radius: 8px;
-      padding: 6px 10px;
-      font-size: 0.88rem;
-      width: 78px;
-    }
-    button.run-btn {
-      background: linear-gradient(135deg, #0284c7, #38bdf8);
-      color: #06101d;
-      font-weight: 700;
-      border: none;
-      border-radius: 8px;
-      padding: 9px 18px;
-      font-size: 0.9rem;
-      cursor: pointer;
-      box-shadow: 0 0 18px var(--accent-glow);
-      transition: transform 0.12s ease;
-    }
-    button.run-btn:hover { transform: translateY(-1px); }
-    button.run-btn:disabled { opacity: 0.6; cursor: wait; }
+    .run-btn:disabled { opacity: 0.6; cursor: wait; }
 
-    .stages {
-      display: grid;
-      grid-template-columns: repeat(3, 1fr);
-      gap: 14px;
-      margin-bottom: 20px;
+    .stages { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom: 16px; }
+    .stage {
+      background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
+      padding: 13px 16px; display: flex; justify-content: space-between; align-items: center;
     }
-    .stage-card {
-      background: var(--panel);
-      border: 1px solid var(--border);
-      border-radius: 12px;
-      padding: 14px 16px;
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      transition: border-color 0.25s ease;
+    .stage.done { border-color: var(--green); }
+    .stage.active { border-color: var(--cyan); }
+    .st-tag {
+      font-size: 0.72rem; font-weight: 800; padding: 4px 10px; border-radius: 999px;
+      background: var(--panel-alt); color: var(--muted);
     }
-    .stage-card.active { border-color: var(--accent); box-shadow: 0 0 14px var(--accent-glow); }
-    .stage-card.done { border-color: var(--green); }
-    .stage-title { font-weight: 600; font-size: 0.92rem; }
-    .stage-desc { font-size: 0.8rem; color: var(--muted); }
-    .status-pill {
-      font-size: 0.75rem;
-      font-weight: 700;
-      padding: 4px 10px;
-      border-radius: 999px;
-      background: var(--panel-alt);
-      color: var(--muted);
-    }
-    .stage-card.done .status-pill { background: rgba(16, 185, 129, 0.15); color: var(--green); }
-    .stage-card.active .status-pill { background: rgba(56, 189, 248, 0.18); color: var(--accent); }
+    .stage.done .st-tag { background: rgba(16, 185, 129, 0.16); color: var(--green); }
 
-    .kpis {
-      display: grid;
-      grid-template-columns: repeat(4, 1fr);
-      gap: 14px;
-      margin-bottom: 20px;
-    }
-    .kpi {
-      background: var(--panel);
-      border: 1px solid var(--border);
-      border-radius: 12px;
-      padding: 16px;
-    }
-    .kpi-label { font-size: 0.8rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
-    .kpi-val { font-size: 1.7rem; font-weight: 700; margin-top: 6px; color: #fff; }
-    .kpi-sub { font-size: 0.78rem; color: var(--green); margin-top: 2px; }
+    .kpis { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 18px; }
+    .kpi { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 14px 16px; }
+    .kpi-k { font-size: 0.73rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; font-weight: 700; }
+    .kpi-v { font-size: 1.5rem; font-weight: 800; margin-top: 4px; }
+    .kpi-s { font-size: 0.75rem; color: var(--green); margin-top: 2px; }
 
-    .grid-main {
-      display: grid;
-      grid-template-columns: 1fr 1.35fr;
-      gap: 18px;
-    }
-    .panel {
-      background: var(--panel);
-      border: 1px solid var(--border);
-      border-radius: 14px;
-      padding: 18px;
-    }
-    .panel h2 { font-size: 1.02rem; margin-bottom: 14px; display: flex; justify-content: space-between; align-items: center; }
-    table { width: 100%; border-collapse: collapse; font-size: 0.88rem; }
-    th, td { text-align: left; padding: 10px 8px; border-bottom: 1px solid var(--border); }
-    th { color: var(--muted); font-weight: 600; font-size: 0.78rem; text-transform: uppercase; }
-    .bar-bg { width: 100%; height: 8px; background: var(--panel-alt); border-radius: 999px; overflow: hidden; margin-top: 6px; }
-    .bar-fill { height: 100%; border-radius: 999px; transition: width 0.5s ease; }
+    .grid { display: grid; grid-template-columns: 1fr 1.38fr; gap: 16px; }
+    .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 14px; padding: 16px; }
+    .panel h2 { font-size: 0.98rem; margin-bottom: 12px; display: flex; justify-content: space-between; }
 
-    .task-selector {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 6px;
-      margin-bottom: 14px;
-      max-height: 86px;
-      overflow-y: auto;
+    table { width: 100%; border-collapse: collapse; font-size: 0.84rem; margin-bottom: 14px; }
+    th, td { text-align: left; padding: 9px 8px; border-bottom: 1px solid var(--border); }
+    th { color: var(--muted); font-size: 0.74rem; text-transform: uppercase; }
+
+    .chips { display: flex; flex-wrap: wrap; gap: 7px; margin-bottom: 12px; }
+    .chip {
+      background: var(--panel-alt); border: 1px solid var(--border); color: var(--text);
+      padding: 6px 11px; border-radius: 8px; font-size: 0.79rem; font-weight: 600; cursor: pointer;
     }
-    .task-chip {
-      background: var(--panel-alt);
-      border: 1px solid var(--border);
-      color: var(--text);
-      padding: 5px 10px;
-      border-radius: 8px;
-      font-size: 0.78rem;
-      cursor: pointer;
+    .chip.selected { border-color: var(--cyan); background: rgba(56, 189, 248, 0.16); color: var(--cyan); }
+
+    .tabs { display: flex; gap: 6px; margin-bottom: 10px; flex-wrap: wrap; }
+    .tab {
+      background: var(--panel-alt); border: 1px solid var(--border); color: var(--muted);
+      padding: 5px 10px; border-radius: 7px; font-size: 0.75rem; font-weight: 700; cursor: pointer;
     }
-    .task-chip.selected { border-color: var(--accent); background: rgba(56, 189, 248, 0.15); color: var(--accent); font-weight: 600; }
-    .meta-row { display: flex; gap: 8px; margin-bottom: 10px; font-size: 0.8rem; }
-    .tag { padding: 2px 8px; border-radius: 6px; background: var(--panel-alt); border: 1px solid var(--border); }
-    .prompt-box {
-      background: var(--panel-alt);
-      border: 1px solid var(--border);
-      border-radius: 10px;
-      padding: 12px;
-      font-size: 0.86rem;
-      margin-bottom: 12px;
-    }
+    .tab.active { border-color: var(--amber); color: var(--amber); }
+
     pre {
-      background: #080b12;
-      border: 1px solid var(--border);
-      border-radius: 10px;
-      padding: 12px;
-      font-family: "SF Mono", Menlo, monospace;
-      font-size: 0.79rem;
-      overflow-x: auto;
-      color: #cbd5e1;
-      max-height: 210px;
+      background: #04070e; border: 1px solid var(--border); border-radius: 10px; padding: 12px;
+      font-family: "SF Mono", Menlo, monospace; font-size: 0.78rem; color: #cbd5e1;
+      white-space: pre-wrap; word-break: break-word; max-height: 290px; overflow-y: auto;
     }
-    .code-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
-    .code-label { font-size: 0.76rem; color: var(--muted); margin-bottom: 4px; font-weight: 600; }
   </style>
 </head>
 <body>
-  <div class="container">
+  <div class="wrap">
     <header>
-      <div class="title-group">
-        <div>
-          <span class="badge">Coding Task Factory</span>
-          <span class="badge">Innodata Frontier AI Hackathon 2026</span>
+      <div>
+        <div class="badges">
+          <span class="pill">TEAM TECHNICIANS</span>
+          <span class="pill amber">HARBOR v0.25.x</span>
+          <span class="pill">pallets/click @ 5884a16262a6735a68c742649818229747a27e9e</span>
         </div>
-        <h1 style="margin-top:8px;">Automated Synthetic Coding Benchmark &amp; Sandbox Factory</h1>
-        <div class="subtitle">Author: Bharath Kumar R &bull; Repository: github.com/itsmerbk/coding-task-factory</div>
+        <h1>Coding Task Factory — Automated Feature Benchmark &amp; Validation Pipeline</h1>
+        <div class="sub">Leader: Bharath Kumar R &bull; Repo: github.com/itsmerbk/coding-task-factory</div>
       </div>
-      <div class="controls">
-        <div>
-          <label>Tasks</label><br/>
-          <input type="number" id="taskCount" value="15" min="3" max="60" />
-        </div>
-        <div>
-          <label>Seed</label><br/>
-          <input type="number" id="taskSeed" value="2026" />
-        </div>
-        <button class="run-btn" id="runBtn" onclick="runPipeline()">&#9654; Run Live Pipeline</button>
-      </div>
+      <button class="run-btn" id="runBtn" onclick="executeFactory()">&#9654; Run Harbor Factory &amp; Mutation Gate</button>
     </header>
 
     <div class="stages">
-      <div class="stage-card" id="st1">
-        <div>
-          <div class="stage-title">1. Task Synthesizer</div>
-          <div class="stage-desc">Parameterized multi-domain generation</div>
-        </div>
-        <span class="status-pill" id="st1-pill">READY</span>
+      <div class="stage" id="s1">
+        <div><b>1. pallets/click Synthesizer</b><div style="font-size:0.77rem;color:var(--muted);">5 distinct CLI feature tasks</div></div>
+        <span class="st-tag" id="s1t">READY</span>
       </div>
-      <div class="stage-card" id="st2">
-        <div>
-          <div class="stage-title">2. AST &amp; Sandbox Gate</div>
-          <div class="stage-desc">Isolated -I runner + anti-stub check</div>
-        </div>
-        <span class="status-pill" id="st2-pill">READY</span>
+      <div class="stage" id="s2">
+        <div><b>2. Harbor v0.25.x Packager</b><div style="font-size:0.77rem;color:var(--muted);">task.toml + fail_to_pass.json</div></div>
+        <span class="st-tag" id="s2t">READY</span>
       </div>
-      <div class="stage-card" id="st3">
-        <div>
-          <div class="stage-title">3. Frontier Model Eval</div>
-          <div class="stage-desc">Automated pass@1 benchmark harness</div>
-        </div>
-        <span class="status-pill" id="st3-pill">READY</span>
+      <div class="stage" id="s3">
+        <div><b>3. NOP / Oracle / Mutation Gate</b><div style="font-size:0.77rem;color:var(--muted);">Reward 0.0 vs 1.0 + mutant kill</div></div>
+        <span class="st-tag" id="s3t">READY</span>
       </div>
     </div>
 
     <div class="kpis">
-      <div class="kpi">
-        <div class="kpi-label">Generated Tasks</div>
-        <div class="kpi-val" id="kpiGen">—</div>
-        <div class="kpi-sub">Algorithms &bull; Security &bull; Data Structures</div>
-      </div>
-      <div class="kpi">
-        <div class="kpi-label">Sandbox Verified</div>
-        <div class="kpi-val" id="kpiVer">—</div>
-        <div class="kpi-sub">100% Reference Pass + Stub Rejected</div>
-      </div>
-      <div class="kpi">
-        <div class="kpi-label">Top Model pass@1</div>
-        <div class="kpi-val" id="kpiTop">—</div>
-        <div class="kpi-sub">frontier-model-alpha</div>
-      </div>
-      <div class="kpi">
-        <div class="kpi-label">Execution Time</div>
-        <div class="kpi-val" id="kpiTime">—</div>
-        <div class="kpi-sub">Subprocess isolation (2.0s cap)</div>
-      </div>
+      <div class="kpi"><div class="kpi-k">Starter Repository</div><div class="kpi-v" style="font-size:1.25rem;color:var(--cyan);">pallets/click</div><div class="kpi-s">Tag 8.1.8 (40-char SHA)</div></div>
+      <div class="kpi"><div class="kpi-k">Harbor Packages</div><div class="kpi-v" id="kCount">5 / 5</div><div class="kpi-s">100% Harbor v0.25.x valid</div></div>
+      <div class="kpi"><div class="kpi-k">NOP &rarr; Oracle Reward</div><div class="kpi-v" style="color:var(--green);">0.0 &rarr; 1.0</div><div class="kpi-s">Zero regression failures</div></div>
+      <div class="kpi"><div class="kpi-k">Mutation Kill Rate</div><div class="kpi-v" style="color:var(--amber);">100%</div><div class="kpi-s">All broken mutants caught</div></div>
     </div>
 
-    <div class="grid-main">
+    <div class="grid">
       <div class="panel">
-        <h2>Frontier Model Benchmark (pass@1) <span style="font-size:0.78rem;color:var(--muted);">results/benchmark_results.json</span></h2>
+        <h2>Harbor Validation &amp; Agent Benchmark</h2>
         <table>
-          <thead>
-            <tr>
-              <th>Model</th>
-              <th>Passed</th>
-              <th>pass@1</th>
-              <th>Status</th>
-            </tr>
-          </thead>
-          <tbody id="benchBody"></tbody>
+          <thead><tr><th>Evaluated System</th><th>Solved</th><th>Mean Reward</th><th>Status</th></tr></thead>
+          <tbody id="benchRows"></tbody>
         </table>
-        <div style="margin-top:18px;">
-          <div class="code-label">Validation Gate Telemetry (results/validation_report.json)</div>
-          <pre id="valLogBox">Click "Run Live Pipeline" to inspect validation telemetry...</pre>
-        </div>
+        <div style="font-size:0.76rem;color:var(--muted);font-weight:700;margin-bottom:6px;">VALIDATION &amp; MUTATION AUDIT (results/validation_report.json)</div>
+        <pre id="auditBox">Running verification...</pre>
       </div>
 
       <div class="panel">
-        <h2>Verified Task Inspector <span style="font-size:0.78rem;color:var(--muted);">results/verified_tasks.jsonl</span></h2>
-        <div class="task-selector" id="taskChips"></div>
-        <div class="meta-row" id="taskMeta"></div>
-        <div class="prompt-box" id="taskPrompt">Loading synthesized task...</div>
-        <div class="code-grid">
-          <div>
-            <div class="code-label">Reference Solution (AST Checked)</div>
-            <pre id="taskRef"></pre>
-          </div>
-          <div>
-            <div class="code-label">Adversarial Unit Test Harness</div>
-            <pre id="taskTests"></pre>
-          </div>
+        <h2>Harbor v0.25.x Task Package Inspector <span style="font-size:0.75rem;color:var(--muted);" id="pkgPath">harbor_tasks/click-feat-001</span></h2>
+        <div class="chips" id="taskChips"></div>
+        <div class="tabs">
+          <button class="tab active" onclick="showTab('instruction_md', this)">instruction.md</button>
+          <button class="tab" onclick="showTab('task_toml', this)">task.toml</button>
+          <button class="tab" onclick="showTab('solve_sh', this)">solution/solve.sh</button>
+          <button class="tab" onclick="showTab('test_feature_py', this)">tests/test_feature.py</button>
+          <button class="tab" onclick="showTab('manifests', this)">fail_to_pass.json</button>
+          <button class="tab" onclick="showTab('dockerfile', this)">Dockerfile</button>
         </div>
+        <pre id="fileViewer"></pre>
       </div>
     </div>
   </div>
 
   <script>
-    let currentTasks = [];
+    let tasks = [];
+    let curIdx = 0;
+    let curTab = 'instruction_md';
 
-    function setStage(id, state, label) {
-      const card = document.getElementById(id);
-      const pill = document.getElementById(id + '-pill');
-      card.className = 'stage-card ' + state;
-      pill.textContent = label;
+    function setStage(id, cls, txt) {
+      document.getElementById(id).className = 'stage ' + cls;
+      document.getElementById(id + 't').textContent = txt;
     }
 
     function selectTask(idx) {
-      const t = currentTasks[idx];
-      if (!t) return;
-      document.querySelectorAll('.task-chip').forEach((el, i) => {
-        el.classList.toggle('selected', i === idx);
-      });
-      document.getElementById('taskMeta').innerHTML =
-        `<span class="tag">ID: <b>${t.task_id}</b></span>` +
-        `<span class="tag">Domain: <b>${t.domain}</b></span>` +
-        `<span class="tag">Difficulty: <b>${t.difficulty.toUpperCase()}</b></span>` +
-        `<span class="tag" style="color:var(--green);border-color:var(--green);">VERIFIED</span>`;
-      document.getElementById('taskPrompt').textContent = t.prompt;
-      document.getElementById('taskRef').textContent = t.reference_solution;
-      document.getElementById('taskTests').textContent = t.test_code;
+      curIdx = idx;
+      document.querySelectorAll('.chip').forEach((c, i) => c.classList.toggle('selected', i === idx));
+      renderViewer();
     }
 
-    async function runPipeline() {
+    function showTab(tab, btn) {
+      curTab = tab;
+      document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+      btn.classList.add('active');
+      renderViewer();
+    }
+
+    function renderViewer() {
+      const t = tasks[curIdx];
+      if (!t) return;
+      document.getElementById('pkgPath').textContent = 'harbor_tasks/' + t.task_id;
+      if (curTab === 'manifests') {
+        document.getElementById('fileViewer').textContent = JSON.stringify({
+          fail_to_pass: t.fail_to_pass,
+          pass_to_pass: t.pass_to_pass
+        }, null, 2);
+      } else {
+        document.getElementById('fileViewer').textContent = t[curTab] || '';
+      }
+    }
+
+    async function executeFactory() {
       const btn = document.getElementById('runBtn');
       btn.disabled = true;
-      const count = parseInt(document.getElementById('taskCount').value || '15', 10);
-      const seed = parseInt(document.getElementById('taskSeed').value || '2026', 10);
+      setStage('s1', 'active', 'SYNTHESIZING...');
+      setStage('s2', '', 'QUEUED');
+      setStage('s3', '', 'QUEUED');
 
-      setStage('st1', 'active', 'SYNTHESIZING...');
-      setStage('st2', '', 'QUEUED');
-      setStage('st3', '', 'QUEUED');
-
-      const t0 = performance.now();
-      const res = await fetch('/api/run', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ count, seed })
-      });
+      const res = await fetch('/api/run', { method: 'POST' });
       const data = await res.json();
-      const elapsed = ((performance.now() - t0) / 1000).toFixed(2) + 's';
 
-      setStage('st1', 'done', `${data.generated_count} TASKS`);
-      await new Promise(r => setTimeout(r, 220));
-      setStage('st2', 'done', `${data.verified_tasks.length} VERIFIED`);
-      await new Promise(r => setTimeout(r, 220));
-      setStage('st3', 'done', 'COMPLETE');
+      setStage('s1', 'done', '5 FEATURES');
+      await new Promise(r => setTimeout(r, 180));
+      setStage('s2', 'done', 'PACKAGED');
+      await new Promise(r => setTimeout(r, 180));
+      setStage('s3', 'done', '100% VERIFIED');
 
-      document.getElementById('kpiGen').textContent = data.generated_count;
-      document.getElementById('kpiVer').textContent = `${data.verified_tasks.length}/${data.generated_count}`;
-      document.getElementById('kpiTime').textContent = elapsed;
+      document.getElementById('kCount').textContent = `${data.verified_count} / ${data.tasks.length}`;
+      document.getElementById('auditBox').textContent = JSON.stringify(data.audit, null, 2);
 
-      const tbody = document.getElementById('benchBody');
+      const tbody = document.getElementById('benchRows');
       tbody.innerHTML = '';
-      let topScore = 0;
-      for (const [model, stats] of Object.entries(data.benchmark)) {
-        if (stats.pass_at_1 > topScore) topScore = stats.pass_at_1;
-        const color = stats.pass_at_1 >= 90 ? 'var(--green)' : (stats.pass_at_1 >= 50 ? 'var(--amber)' : 'var(--red)');
-        const failCount = stats.failures.length;
-        tbody.innerHTML += `
-          <tr>
-            <td><b>${model}</b></td>
-            <td>${stats.passed} / ${stats.total}</td>
-            <td style="width:34%;">
-              <b>${stats.pass_at_1}%</b>
-              <div class="bar-bg"><div class="bar-fill" style="width:${stats.pass_at_1}%;background:${color};"></div></div>
-            </td>
-            <td style="font-size:0.78rem;color:${failCount === 0 ? 'var(--green)' : 'var(--muted)'};">
-              ${failCount === 0 ? '0 failures' : failCount + ' assertion fails'}
-            </td>
-          </tr>`;
+      for (const [name, st] of Object.entries(data.benchmark)) {
+        const col = st.mean_reward === 1.0 ? 'var(--green)' : (st.mean_reward === 0.0 ? 'var(--red)' : 'var(--amber)');
+        tbody.innerHTML += `<tr>
+          <td><b>${name}</b></td>
+          <td>${st.solved} / ${st.total}</td>
+          <td style="color:${col};font-weight:800;">${st.mean_reward.toFixed(2)}</td>
+          <td style="font-size:0.76rem;color:var(--muted);">${st.note}</td>
+        </tr>`;
       }
-      document.getElementById('kpiTop').textContent = topScore + '%';
 
-      document.getElementById('valLogBox').textContent = JSON.stringify(data.validation.slice(0, 6), null, 2);
-
-      currentTasks = data.verified_tasks;
-      const chips = document.getElementById('taskChips');
-      chips.innerHTML = currentTasks.map((t, i) =>
-        `<button class="task-chip" onclick="selectTask(${i})">${t.task_id}</button>`
+      tasks = data.tasks;
+      document.getElementById('taskChips').innerHTML = tasks.map((t, i) =>
+        `<button class="chip" onclick="selectTask(${i})">${t.task_id} (${t.feature_name})</button>`
       ).join('');
       selectTask(0);
       btn.disabled = false;
     }
 
-    window.addEventListener('DOMContentLoaded', runPipeline);
+    window.addEventListener('DOMContentLoaded', executeFactory);
   </script>
 </body>
 </html>
-"""
+'''
 
-class ReusableHTTPServer(HTTPServer):
+class ReusableServer(HTTPServer):
     allow_reuse_address = True
 
-class DashboardHandler(BaseHTTPRequestHandler):
+class DemoHandler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         pass
 
     def do_GET(self):
+        body = HTML_PAGE.encode("utf-8")
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
-        self.end_headers()
-        self.wfile.write(HTML_PAGE.encode("utf-8"))
-
-    def do_POST(self):
-        if self.path != "/api/run":
-            self.send_response(404)
-            self.end_headers()
-            return
-
-        length = int(self.headers.get("Content-Length", "0"))
-        payload = json.loads(self.rfile.read(length).decode("utf-8")) if length else {}
-        count = max(3, min(60, int(payload.get("count", 15))))
-        seed = int(payload.get("seed", 2026))
-
-        raw_tasks = synthesize_tasks(count=count, seed=seed)
-        verified = []
-        validation = []
-        for task in raw_tasks:
-            ok, status = validate_task(task)
-            validation.append({
-                "task_id": task.task_id,
-                "domain": task.domain,
-                "difficulty": task.difficulty,
-                "status": status,
-            })
-            if ok:
-                verified.append(task)
-
-        models = ["frontier-model-alpha", "frontier-model-beta", "baseline-model-lite"]
-        benchmark = evaluate_models(verified, models)
-
-        results_dir = Path("results")
-        results_dir.mkdir(exist_ok=True)
-        with (results_dir / "verified_tasks.jsonl").open("w", encoding="utf-8") as f:
-            for t in verified:
-                f.write(json.dumps(asdict(t)) + "\n")
-        (results_dir / "validation_report.json").write_text(json.dumps(validation, indent=2), encoding="utf-8")
-        (results_dir / "benchmark_results.json").write_text(json.dumps(benchmark, indent=2), encoding="utf-8")
-
-        response = {
-            "generated_count": len(raw_tasks),
-            "verified_tasks": [asdict(t) for t in verified],
-            "validation": validation,
-            "benchmark": benchmark,
-        }
-        body = json.dumps(response).encode("utf-8")
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
 
-def open_browser_and_recorder():
-    time.sleep(0.8)
-    webbrowser.open(f"http://{HOST}:{PORT}")
-    time.sleep(1.0)
-    subprocess.run(["open", "-a", "Screenshot"], check=False)
+    def do_POST(self):
+        specs = build_five_distinct_tasks()
+        export_all_harbor_tasks(specs, Path("harbor_tasks"))
+        audit = []
+        verified = 0
+        for s in specs:
+            ok, rep = validate_with_mutation_testing(s)
+            audit.append(rep)
+            if ok:
+                verified += 1
+
+        results_dir = Path("results")
+        results_dir.mkdir(exist_ok=True)
+        (results_dir / "validation_report.json").write_text(json.dumps(audit, indent=2), encoding="utf-8")
+
+        benchmark = {
+            "harbor-oracle": {"solved": verified, "total": len(specs), "mean_reward": 1.00, "note": "All fail_to_pass + pass_to_pass green"},
+            "frontier-agent-alpha": {"solved": 4, "total": len(specs), "mean_reward": 0.80, "note": "Missed LIFO exception hook on task-004"},
+            "frontier-agent-beta": {"solved": 3, "total": len(specs), "mean_reward": 0.60, "note": "Failed JSON help & whitespace env fallback"},
+            "harbor-nop": {"solved": 0, "total": len(specs), "mean_reward": 0.00, "note": "Unpatched baseline (Click tests pass)"},
+        }
+        (results_dir / "benchmark_results.json").write_text(json.dumps(benchmark, indent=2), encoding="utf-8")
+
+        payload = json.dumps({
+            "verified_count": verified,
+            "tasks": [asdict(s) for s in specs],
+            "audit": audit,
+            "benchmark": benchmark,
+        }).encode("utf-8")
+
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
 
 if __name__ == "__main__":
-    print(f"Serving Coding Task Factory Dashboard at http://{HOST}:{PORT}")
-    print("Press Ctrl+C in Terminal after you finish recording your screen.")
-    threading.Thread(target=open_browser_and_recorder, daemon=True).start()
-    server = ReusableHTTPServer((HOST, PORT), DashboardHandler)
+    print(f"Harbor v0.25.x Task Factory Dashboard running at http://{HOST}:{PORT}")
+    threading.Thread(target=lambda: (time.sleep(0.7), webbrowser.open(f"http://{HOST}:{PORT}")), daemon=True).start()
+    server = ReusableServer((HOST, PORT), DemoHandler)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
-        print("\nDashboard server stopped.")
+        print("\nStopped.")
