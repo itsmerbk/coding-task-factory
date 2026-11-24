@@ -1,0 +1,3 @@
+# Feature: Inclusive Bounded Integer Parameter Type (`click.bounded_int`)
+
+Implement `src/click/bounded_int.py` exposing `BoundedIntParamType(click.ParamType)` initialized with `min_value: int` and `max_value: int` (raising `ValueError` if `min_value > max_value`). During `convert(value, param, ctx)`, pass `None` unchanged, coerce valid integers within `[min_value, max_value]`, and call `self.fail(...)` for non-integers or out-of-range values.

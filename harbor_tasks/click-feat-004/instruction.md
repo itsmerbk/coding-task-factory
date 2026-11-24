@@ -1,0 +1,3 @@
+# Feature: Scoped Context LIFO Resource Guard (`click.ctx_lifo_guard`)
+
+Implement `src/click/ctx_lifo_guard.py` defining `register_lifo_resources(ctx: click.Context, resources: list[str], audit_log: list[str]) -> None` that opens resources in forward order (`open:<name>`) and registers `ctx.call_on_close` hooks so resources close in strict LIFO order (`close:<name>`) even if a `ClickException` aborts execution.

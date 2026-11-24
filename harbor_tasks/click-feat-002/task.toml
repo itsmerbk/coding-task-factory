@@ -1,0 +1,16 @@
+version = "1.0"
+
+[metadata]
+team_name = "Technicians"
+author_name = "Bharath Kumar R"
+difficulty = "medium"
+category = "feature-development"
+repository = "https://github.com/pallets/click.git"
+base_commit = "934813e4d421071a1b3db3973c02fe2721359a6e"
+license = "BSD-3-Clause"
+
+[verifier]
+timeout_sec = 120.0
+
+[agent]
+timeout_sec = 180.0

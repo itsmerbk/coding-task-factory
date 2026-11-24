@@ -1,59 +1,63 @@
-import ast
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
 from typing import Tuple
-from factory.generator import CodingTask
+from factory.generator import FeatureTaskSpec
 
-BANNED_CALLS = {"eval", "exec", "compile", "__import__", "open", "system", "popen"}
+REQUIRED_FILES = [
+    "instruction.md",
+    "task.toml",
+    "environment/Dockerfile",
+    "solution/solve.sh",
+    "tests/test.sh",
+    "tests/test_feature.py",
+    "tests/fail_to_pass.json",
+    "tests/pass_to_pass.json",
+]
 
-def static_ast_check(code: str, expected_fn: str) -> Tuple[bool, str]:
-    try:
-        tree = ast.parse(code)
-    except SyntaxError as exc:
-        return False, f"SyntaxError: {exc}"
+def validate_with_mutation_testing(spec: FeatureTaskSpec, root: Path = Path("harbor_tasks")) -> Tuple[bool, dict]:
+    tdir = root / spec.task_id
+    for rel in REQUIRED_FILES:
+        if not (tdir / rel).exists():
+            return False, {"task_id": spec.task_id, "status": f"Missing {rel}"}
 
-    fn_names = [node.name for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)]
-    if expected_fn not in fn_names:
-        return False, f"Missing required function `{expected_fn}`"
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        src_click = tmp_path / "src" / "click"
+        src_click.mkdir(parents=True)
+        (src_click / "__init__.py").write_text("from click import *\n", encoding="utf-8")
+        test_file = tmp_path / "test_feature.py"
+        test_file.write_text(spec.test_feature_py, encoding="utf-8")
 
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
-            if node.func.id in BANNED_CALLS:
-                return False, f"Banned call detected: {node.func.id}"
-    return True, "AST check passed"
+        # 1. NOP check (must fail -> reward 0.0)
+        nop = subprocess.run([sys.executable, "-m", "pytest", str(test_file), "-q"], cwd=str(tmp_path), capture_output=True)
+        if nop.returncode == 0:
+            return False, {"task_id": spec.task_id, "status": "NOP baseline passed unexpectedly"}
 
-def run_in_sandbox(solution_code: str, test_code: str, timeout_sec: float = 2.0) -> Tuple[bool, str]:
-    harness = f"{solution_code}\n\n{test_code}\nprint('ALL_TESTS_PASSED')\n"
-    with tempfile.TemporaryDirectory() as tmpdir:
-        script_path = Path(tmpdir) / "test_harness.py"
-        script_path.write_text(harness, encoding="utf-8")
-        try:
-            proc = subprocess.run(
-                [sys.executable, "-I", str(script_path)],
-                capture_output=True,
-                text=True,
-                timeout=timeout_sec,
-            )
-            if proc.returncode == 0 and "ALL_TESTS_PASSED" in proc.stdout:
-                return True, "Passed"
-            return False, (proc.stderr.strip() or proc.stdout.strip() or "AssertionError")
-        except subprocess.TimeoutExpired:
-            return False, "TimeoutError"
+        # 2. Oracle check (must pass -> reward 1.0)
+        solve_script = tmp_path / "solve.sh"
+        solve_script.write_text(spec.solve_sh.replace("/app/src/click", str(src_click)), encoding="utf-8")
+        subprocess.run(["bash", str(solve_script)], check=True)
+        oracle = subprocess.run([sys.executable, "-m", "pytest", str(test_file), "-q"], cwd=str(tmp_path), capture_output=True)
+        if oracle.returncode != 0:
+            return False, {"task_id": spec.task_id, "status": "Oracle patch failed tests"}
 
-def validate_task(task: CodingTask) -> Tuple[bool, str]:
-    ok_ast, msg_ast = static_ast_check(task.reference_solution, task.function_name)
-    if not ok_ast:
-        return False, msg_ast
+        # 3. Mutation test check (broken implementation must fail -> mutant killed)
+        mod_file = list(src_click.glob("*.py"))
+        for f in mod_file:
+            if f.name != "__init__.py":
+                f.write_text(spec.mutated_patch_py, encoding="utf-8")
+        mutant = subprocess.run([sys.executable, "-m", "pytest", str(test_file), "-q"], cwd=str(tmp_path), capture_output=True)
+        if mutant.returncode == 0:
+            return False, {"task_id": spec.task_id, "status": "Mutation test escaped!"}
 
-    ok_ref, msg_ref = run_in_sandbox(task.reference_solution, task.test_code)
-    if not ok_ref:
-        return False, f"Reference failed: {msg_ref}"
-
-    stub = f"def {task.function_name}(*args, **kwargs):\n    return None\n"
-    ok_stub, _ = run_in_sandbox(stub, task.test_code)
-    if ok_stub:
-        return False, "Trivial stub passed tests; test suite is too weak"
-
-    return True, "Verified"
+    return True, {
+        "task_id": spec.task_id,
+        "feature": spec.feature_name,
+        "difficulty": spec.difficulty,
+        "nop_reward": 0.0,
+        "oracle_reward": 1.0,
+        "mutant_killed": True,
+        "status": "Verified (Harbor v0.25.x + Mutation Tested)",
+    }

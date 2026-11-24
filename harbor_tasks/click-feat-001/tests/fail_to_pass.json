@@ -1,0 +1,4 @@
+[
+  "tests/test_feature.py::test_invalid_constructor_bounds",
+  "tests/test_feature.py::test_cli_inclusive_bounds_and_rejection"
+]

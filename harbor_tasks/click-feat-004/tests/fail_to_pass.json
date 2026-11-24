@@ -1,0 +1,3 @@
+[
+  "tests/test_feature.py::test_lifo_cleanup_on_exception"
+]
